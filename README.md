@@ -56,7 +56,7 @@ starting point. New incident files welcome via PR, see
 ## What gets scanned
 
 - `package.json` files anywhere under the scan root, including deeply
-  nested `node_modules`. Disk is the ground truth; lockfiles can drift.
+  nested `node_modules`.
 - Lockfiles: `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`,
   `pnpm-lock.yaml`.
 - Package manager caches: npm cache **index** (not the multi-GB tarball
@@ -90,6 +90,15 @@ For the "no version of the package is safe" case, use the `@*` wildcard.
 
 `npm audit` runs per-project. This runs once across the whole machine
 and checks caches too.
+
+## macOS Gatekeeper
+
+Binaries from the Releases page are unsigned. If macOS blocks one on first
+run, clear the quarantine flag or do the right-click dance:
+
+```sh
+xattr -d com.apple.quarantine npm-chainsaw
+```
 
 ## License
 

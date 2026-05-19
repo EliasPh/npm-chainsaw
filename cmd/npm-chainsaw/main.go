@@ -4,8 +4,7 @@ package main
 
 import "os"
 
-// version is the build-time version string. Bumped manually for now.
-const version = "0.0.1-dev"
+var version = "dev"
 
 func main() {
 	// Thin wrapper around runCLI so the exit code is testable.
