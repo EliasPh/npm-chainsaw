@@ -9,6 +9,10 @@ machine. Read-only, never touches anything on disk.
 
 ## Install
 
+Download a macOS binary from the
+[Releases page](https://github.com/EliasPh/npm-chainsaw/releases) and
+`chmod +x` it. Or:
+
 ```sh
 go install github.com/EliasPh/npm-chainsaw/cmd/npm-chainsaw@latest
 ```
