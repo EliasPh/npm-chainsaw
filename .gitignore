@@ -1,0 +1,16 @@
+# Built binary (built at repo root or inside cmd/ during dev)
+/npm-chainsaw
+/cmd/npm-chainsaw/npm-chainsaw
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.txt
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code settings (personal tooling, not part of the project)
+.claude/

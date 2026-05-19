@@ -1,0 +1,18 @@
+# Incident list template.
+#
+# Copy this file to <YYYY-MM-slug>.txt in this directory and replace
+# the placeholders below. Comments and blank lines are ignored; only
+# "name@version" / "name@*" lines are parsed.
+#
+# source:   https://link-to-the-original-report
+# date:     YYYY-MM-DD
+# summary:  one short line about what happened
+
+# Example entries (replace with the real compromised packages).
+# Each line is an exact version, a comma-separated list, or "name@*"
+# for any version (only when no version of the package is safe).
+
+# @scope/package@1.2.3
+# unscoped-package@4.5.6
+# multi-version-pkg@0.8.1, 0.8.2, 0.8.3, 0.8.4
+# fully-compromised-pkg@*

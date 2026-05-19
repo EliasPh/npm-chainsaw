@@ -1,0 +1,9 @@
+# Example incident list, not a real one.
+# source: https://example.invalid/
+# date: 2025-01-01
+
+@ctrl/tinycolor@4.1.2
+chalk@5.6.1
+@tanstack/table-core@8.21.3
+# Wildcard: any version of a fully compromised package
+suspicious-pkg@*
