@@ -53,6 +53,12 @@ wot-api@0.8.1, 0.8.2, 0.8.3, 0.8.4
 suspicious-pkg@*
 ```
 
+Browse [`incidents/`](incidents/) for known lists, or grab one directly:
+
+```sh
+curl -O https://raw.githubusercontent.com/EliasPh/npm-chainsaw/main/incidents/<file>.txt
+```
+
 See [`incidents/TEMPLATE.txt`](incidents/TEMPLATE.txt) for a copy-paste
 starting point. New incident files welcome via PR, see
 [`incidents/README.md`](incidents/README.md).
