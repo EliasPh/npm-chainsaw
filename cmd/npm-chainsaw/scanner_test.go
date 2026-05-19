@@ -56,12 +56,12 @@ func TestScan_FindsHitsAndAppliesSkipRules(t *testing.T) {
 		"suspicious-pkg": {"*": true},
 	}
 
-	hits, inspected, err := scan(root, targets, nil)
+	hits, counts, err := scan(root, targets, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inspected == 0 {
-		t.Errorf("inspected count should be > 0, got %d", inspected)
+	if counts.Total() == 0 {
+		t.Errorf("inspected count should be > 0, got %+v", counts)
 	}
 
 	// Compare hits by their relative path for stable assertions.

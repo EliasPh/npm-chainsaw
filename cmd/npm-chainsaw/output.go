@@ -92,9 +92,10 @@ func groupHits(hits []Hit) []hitGroup {
 
 // printHuman writes a grouped, human-friendly report.
 //
-// inspected is the file count from the main scan() walk only. Cache scans
-// count entries rather than files, so they're left out of this number.
-func printHuman(w io.Writer, hits []Hit, targets Targets, inspected int, dur time.Duration, verbose, color bool) {
+// In default mode the output is intentionally terse: HIT blocks (capped at
+// 20 locations each) and a per-kind breakdown footer. --verbose adds the
+// full per-target HIT/ok block at the bottom and removes the location cap.
+func printHuman(w io.Writer, hits []Hit, targets Targets, counts Counts, dur time.Duration, verbose, color bool) {
 	a := ansiCodes(color)
 	home, _ := os.UserHomeDir()
 	groups := groupHits(hits)
@@ -119,37 +120,68 @@ func printHuman(w io.Writer, hits []Hit, targets Targets, inspected int, dur tim
 		fmt.Fprintln(w)
 	}
 
-	// Per-specifier status block: every entry from the incident list with a
-	// HIT or ok tag. Lets the user see what was checked, not just what hit.
-	statuses := computeTargetStatuses(targets, groups)
-	fmt.Fprintln(w, "Targets:")
-	for _, s := range statuses {
-		if s.locations > 0 {
-			fmt.Fprintf(w, "  %s%sHIT%s  %s@%s  %s(%d %s)%s\n",
-				a.bold, a.red, a.reset, s.name, s.version,
-				a.dim, s.locations, plural(s.locations, "location", "locations"), a.reset)
-		} else {
-			fmt.Fprintf(w, "  %s%sok%s   %s@%s\n",
-				a.green, a.dim, a.reset, s.name, s.version)
+	// Per-specifier HIT/ok rows: verbose only. The default mode keeps the
+	// report short for incidents with hundreds of targets.
+	if verbose {
+		statuses := computeTargetStatuses(targets, groups)
+		fmt.Fprintln(w, "Targets:")
+		for _, s := range statuses {
+			if s.locations > 0 {
+				fmt.Fprintf(w, "  %s%sHIT%s  %s@%s  %s(%d %s)%s\n",
+					a.bold, a.red, a.reset, s.name, s.version,
+					a.dim, s.locations, plural(s.locations, "location", "locations"), a.reset)
+			} else {
+				fmt.Fprintf(w, "  %s%sok%s   %s@%s\n",
+					a.green, a.dim, a.reset, s.name, s.version)
+			}
 		}
+		fmt.Fprintln(w)
+	}
+
+	// Per-kind breakdown. Reassuring confirmation that the scan did the
+	// work, even when there are zero hits.
+	fmt.Fprintf(w, "Scanned in %s:\n", durStr(dur))
+	for _, row := range countRows(counts) {
+		fmt.Fprintf(w, "  %-12s %8s %s\n", row.label, commafy(row.n), row.unit)
 	}
 	fmt.Fprintln(w)
 
-	// Footer.
-	fmt.Fprintf(w, "Scanned %s files in %s.\n", commafy(inspected), durStr(dur))
-	if len(groups) == 0 {
-		fmt.Fprintf(w, "No matches across %d %s.\n",
-			len(targets), plural(len(targets), "package", "packages"))
+	// Summary: how many packages hit vs were checked.
+	hitN := len(groups)
+	total := len(targets)
+	if hitN == 0 {
+		fmt.Fprintf(w, "%s%d of %d packages HIT%s, %s%d OK%s\n",
+			a.dim, hitN, total, a.reset,
+			a.green, total, a.reset)
 	} else {
-		fmt.Fprintf(w, "Matched %d of %d %s across %d %s.\n",
-			len(groups), len(targets), plural(len(targets), "package", "packages"),
-			totalLocs, plural(totalLocs, "location", "locations"))
+		fmt.Fprintf(w, "%s%s%d of %d packages HIT%s, %s%d OK%s\n",
+			a.bold, a.red, hitN, total, a.reset,
+			a.green, total-hitN, a.reset)
+	}
+}
+
+// countRow is one line of the per-kind footer table.
+type countRow struct {
+	label string
+	n     int
+	unit  string
+}
+
+// countRows returns the breakdown rows in display order.
+func countRows(c Counts) []countRow {
+	return []countRow{
+		{"package.json", c.PackageJSON, "files"},
+		{"lockfiles", c.Lockfile, "files"},
+		{"npm cache", c.NpmCache, "entries"},
+		{"pnpm store", c.PnpmStore, "files"},
+		{"yarn cache", c.YarnCache, "files"},
+		{"global", c.Global, "files"},
 	}
 }
 
 // printJSON writes the machine-readable form. Paths are absolute (no ~
 // substitution; that's only for human display).
-func printJSON(w io.Writer, hits []Hit, targets Targets, inspected int, dur time.Duration) error {
+func printJSON(w io.Writer, hits []Hit, targets Targets, counts Counts, dur time.Duration) error {
 	type jsonLoc struct {
 		Path string `json:"path"`
 		Kind string `json:"kind"`
@@ -163,16 +195,33 @@ func printJSON(w io.Writer, hits []Hit, targets Targets, inspected int, dur time
 		Package string `json:"package"`
 		Version string `json:"version"`
 	}
+	type jsonCounts struct {
+		PackageJSON int `json:"package_json"`
+		Lockfile    int `json:"lockfile"`
+		NpmCache    int `json:"npm_cache"`
+		PnpmStore   int `json:"pnpm_store"`
+		YarnCache   int `json:"yarn_cache"`
+		Global      int `json:"global"`
+	}
 	out := struct {
 		ScannedFiles int             `json:"scanned_files"`
+		ScanCounts   jsonCounts      `json:"scan_counts"`
 		DurationMs   int64           `json:"duration_ms"`
 		Hits         []jsonGroup     `json:"hits"`
 		Unmatched    []jsonUnmatched `json:"unmatched"`
 	}{
-		ScannedFiles: inspected,
-		DurationMs:   dur.Milliseconds(),
-		Hits:         []jsonGroup{},     // emit "[]" not "null" when empty
-		Unmatched:    []jsonUnmatched{}, // ditto
+		ScannedFiles: counts.Total(),
+		ScanCounts: jsonCounts{
+			PackageJSON: counts.PackageJSON,
+			Lockfile:    counts.Lockfile,
+			NpmCache:    counts.NpmCache,
+			PnpmStore:   counts.PnpmStore,
+			YarnCache:   counts.YarnCache,
+			Global:      counts.Global,
+		},
+		DurationMs: dur.Milliseconds(),
+		Hits:       []jsonGroup{},     // emit "[]" not "null" when empty
+		Unmatched:  []jsonUnmatched{}, // ditto
 	}
 	groups := groupHits(hits)
 	for _, g := range groups {
@@ -298,22 +347,23 @@ func commafy(n int) string {
 	return sign + b.String()
 }
 
-// printSearchHeader writes a brief block listing every target. Printed
-// before the scan begins so the user sees what's being checked while the
-// scan runs. Caller suppresses it under --json.
+// printSearchHeader writes the "what we're checking" preamble.
 //
-// Versions of the same package are joined on one line in the same comma
-// form as the incident-list input.
-func printSearchHeader(w io.Writer, listPath string, targets Targets, specifiers int) {
-	if listPath == "" {
-		fmt.Fprintf(w, "Searching for %d %s (%d %s):\n",
-			len(targets), plural(len(targets), "package", "packages"),
-			specifiers, plural(specifiers, "specifier", "specifiers"))
-	} else {
-		fmt.Fprintf(w, "Searching for %d %s (%d %s) from %s:\n",
-			len(targets), plural(len(targets), "package", "packages"),
-			specifiers, plural(specifiers, "specifier", "specifiers"),
-			listPath)
+// Default mode is a single line ("Checking N packages..."). Verbose mode
+// expands to the full target list, one per package, with versions joined
+// by commas (matching the incident-list input format). Caller suppresses
+// it entirely under --json.
+func printSearchHeader(w io.Writer, listPath string, targets Targets, specifiers int, verbose bool) {
+	from := ""
+	if listPath != "" {
+		from = " from " + listPath
+	}
+	fmt.Fprintf(w, "Checking %d %s (%d %s)%s\n",
+		len(targets), plural(len(targets), "package", "packages"),
+		specifiers, plural(specifiers, "specifier", "specifiers"),
+		from)
+	if !verbose {
+		return
 	}
 	names := make([]string, 0, len(targets))
 	for n := range targets {

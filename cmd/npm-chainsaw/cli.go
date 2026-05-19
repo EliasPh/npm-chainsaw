@@ -107,10 +107,11 @@ func runCLI(args []string) int {
 	}
 
 	// Print the search targets so the user knows what's being checked
-	// before the (potentially long) scan starts. JSON output is already
-	// self-describing, so skip it there.
+	// before the (potentially long) scan starts. In default mode this is
+	// a single line; --verbose prints the full target list. JSON output
+	// is already self-describing, so skip it there.
 	if !opts.jsonOut {
-		printSearchHeader(os.Stderr, opts.listPath, targets, count)
+		printSearchHeader(os.Stderr, opts.listPath, targets, count, opts.verbose)
 	}
 
 	// Shared atomic counter between the walker and the progress goroutine,
@@ -123,25 +124,27 @@ func runCLI(args []string) int {
 		go progressLoop(&counter, progressDone)
 	}
 
-	hits, inspected, err := scan(opts.scanRoot, targets, &counter)
+	hits, counts, err := scan(opts.scanRoot, targets, &counter)
 	if err != nil {
 		close(progressDone)
 		fmt.Fprintln(os.Stderr, "error during scan:", err)
 		return 2
 	}
 	if !opts.noCache && home != "" {
-		hits = append(hits, scanCaches(home, targets)...)
+		cacheHits, cacheCounts := scanCaches(home, targets)
+		hits = append(hits, cacheHits...)
+		counts.Add(cacheCounts)
 	}
 	close(progressDone)
 	dur := time.Since(start)
 
 	if opts.jsonOut {
-		if err := printJSON(os.Stdout, hits, targets, inspected, dur); err != nil {
+		if err := printJSON(os.Stdout, hits, targets, counts, dur); err != nil {
 			fmt.Fprintln(os.Stderr, "error encoding json:", err)
 			return 2
 		}
 	} else {
-		printHuman(os.Stdout, hits, targets, inspected, dur, opts.verbose, colorEnabled(os.Stdout))
+		printHuman(os.Stdout, hits, targets, counts, dur, opts.verbose, colorEnabled(os.Stdout))
 	}
 
 	if len(hits) > 0 {

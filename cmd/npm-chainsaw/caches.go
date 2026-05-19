@@ -14,34 +14,49 @@ import (
 // location for homeDir. Each location is best-effort: missing paths are
 // silently skipped. homeDir is passed in (rather than calling
 // os.UserHomeDir directly) so tests can target a synthetic home.
-func scanCaches(homeDir string, targets Targets) []Hit {
-	var hits []Hit
+//
+// Returns the matching hits plus per-source counts. Only the cache-related
+// fields of Counts are populated; the main walk fills the rest.
+func scanCaches(homeDir string, targets Targets) ([]Hit, Counts) {
+	var (
+		hits   []Hit
+		counts Counts
+	)
 
 	// npm cache index only; never content-v2. The index is small and answers
 	// "has this version ever been fetched on this machine".
-	hits = append(hits,
-		scanNpmCacheIndex(filepath.Join(homeDir, ".npm", "_cacache", "index-v5"), targets)...)
+	h, n := scanNpmCacheIndex(filepath.Join(homeDir, ".npm", "_cacache", "index-v5"), targets)
+	hits = append(hits, h...)
+	counts.NpmCache += n
 
 	// pnpm store: real installed packages, walk for package.json.
 	for _, p := range pnpmStorePaths(homeDir) {
-		hits = append(hits, scanForPackageJSONs(p, targets, "pnpm-store")...)
+		h, n := scanForPackageJSONs(p, targets, "pnpm-store")
+		hits = append(hits, h...)
+		counts.PnpmStore += n
 	}
 
 	// Yarn Berry cache: parse zip filenames. Nothing is extracted.
 	for _, p := range yarnBerryCachePaths(homeDir) {
-		hits = append(hits, scanYarnBerryCache(p, targets)...)
+		h, n := scanYarnBerryCache(p, targets)
+		hits = append(hits, h...)
+		counts.YarnCache += n
 	}
 
 	// Yarn v1 cache: extracted folders, walk for package.json.
 	for _, p := range yarnV1CachePaths(homeDir) {
-		hits = append(hits, scanForPackageJSONs(p, targets, "yarn-cache")...)
+		h, n := scanForPackageJSONs(p, targets, "yarn-cache")
+		hits = append(hits, h...)
+		counts.YarnCache += n
 	}
 
 	// Global installs across the common Node version managers and system paths.
 	for _, p := range globalNodeModulesPaths(homeDir) {
-		hits = append(hits, scanForPackageJSONs(p, targets, "global")...)
+		h, n := scanForPackageJSONs(p, targets, "global")
+		hits = append(hits, h...)
+		counts.Global += n
 	}
-	return hits
+	return hits, counts
 }
 
 // --- npm cache index --------------------------------------------------------
@@ -57,8 +72,11 @@ var npmTarballURLRE = regexp.MustCompile(
 // "ledger": each line is "<integrity>\t<json>" for one cache entry. We pull
 // name+version out of the tarball URL via regex, which is faster than
 // json.Unmarshal and resilient to small format changes.
-func scanNpmCacheIndex(root string, targets Targets) []Hit {
-	var hits []Hit
+func scanNpmCacheIndex(root string, targets Targets) ([]Hit, int) {
+	var (
+		hits    []Hit
+		entries int // ledger lines that look like a real cache entry
+	)
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -76,13 +94,14 @@ func scanNpmCacheIndex(root string, targets Targets) []Hit {
 			if m == nil {
 				continue
 			}
+			entries++
 			if h, ok := matchNameVersion(m[1], m[2], path, "npm-cache", targets); ok {
 				hits = append(hits, h)
 			}
 		}
 		return nil
 	})
-	return hits
+	return hits, entries
 }
 
 // matchNameVersion centralizes the target-lookup pattern so the cache
@@ -104,8 +123,11 @@ func matchNameVersion(name, version, path, kind string, targets Targets) (Hit, b
 // each via matchPackageJSON with the given kind. Used wherever the cache
 // layout is "real" installed packages. Only .git is skipped, since we're
 // already inside a known cache and the broader skip rules don't apply.
-func scanForPackageJSONs(root string, targets Targets, kind string) []Hit {
-	var hits []Hit
+func scanForPackageJSONs(root string, targets Targets, kind string) ([]Hit, int) {
+	var (
+		hits  []Hit
+		files int
+	)
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
@@ -122,12 +144,13 @@ func scanForPackageJSONs(root string, targets Targets, kind string) []Hit {
 		if d.Name() != "package.json" {
 			return nil
 		}
+		files++
 		if h, ok := matchPackageJSON(path, targets, kind); ok {
 			hits = append(hits, h)
 		}
 		return nil
 	})
-	return hits
+	return hits, files
 }
 
 // --- yarn berry cache (zip filenames only) ----------------------------------
@@ -135,12 +158,15 @@ func scanForPackageJSONs(root string, targets Targets, kind string) []Hit {
 // scanYarnBerryCache lists .zip files in the Berry cache and extracts
 // (name, version) from each filename. Subdirectories are ignored; Berry
 // stores everything flat at the cache root.
-func scanYarnBerryCache(root string, targets Targets) []Hit {
+func scanYarnBerryCache(root string, targets Targets) ([]Hit, int) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
-	var hits []Hit
+	var (
+		hits  []Hit
+		files int
+	)
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -149,12 +175,13 @@ func scanYarnBerryCache(root string, targets Targets) []Hit {
 		if !ok {
 			continue
 		}
+		files++
 		full := filepath.Join(root, e.Name())
 		if h, ok := matchNameVersion(name, version, full, "yarn-cache", targets); ok {
 			hits = append(hits, h)
 		}
 	}
-	return hits
+	return hits, files
 }
 
 // berryProtocols are the markers Yarn Berry inserts between the package name

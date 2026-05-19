@@ -47,9 +47,12 @@ func TestScanNpmCacheIndex(t *testing.T) {
 		"@ctrl/tinycolor": {"*": true},
 		// lodash deliberately not listed
 	}
-	hits := scanNpmCacheIndex(root, targets)
+	hits, entries := scanNpmCacheIndex(root, targets)
 	if len(hits) != 2 {
 		t.Fatalf("got %d hits, want 2: %v", len(hits), hits)
+	}
+	if entries != 3 {
+		t.Errorf("entries scanned = %d, want 3 (the 3 lines that look like ledger entries)", entries)
 	}
 	found := map[string]bool{}
 	for _, h := range hits {
@@ -94,7 +97,10 @@ func TestScanCaches_AcrossSources(t *testing.T) {
 	zipPath := filepath.Join(berry, "chalk-npm-5.6.1-deadbeef10-cf4c61a9bd.zip")
 	os.WriteFile(zipPath, nil, 0o644)
 
-	hits := scanCaches(home, Targets{"chalk": {"5.6.1": true}})
+	hits, counts := scanCaches(home, Targets{"chalk": {"5.6.1": true}})
+	if counts.Total() == 0 {
+		t.Errorf("counts total should be > 0, got %+v", counts)
+	}
 
 	kinds := map[string]int{}
 	for _, h := range hits {
