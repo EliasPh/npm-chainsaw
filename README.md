@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="npm-chainsaw" width="320">
+</p>
+
 # npm-chainsaw
 
 A small CLI for scanning a machine for npm packages with known-bad versions.
@@ -9,7 +13,7 @@ machine. Read-only, never touches anything on disk.
 
 ## Install
 
-Download a macOS binary from the
+Download a macOS or Linux binary from the
 [Releases page](https://github.com/EliasPh/npm-chainsaw/releases) and
 `chmod +x` it. Or:
 
@@ -18,6 +22,14 @@ go install github.com/EliasPh/npm-chainsaw/cmd/npm-chainsaw@latest
 ```
 
 Or clone the repo and run `go build ./cmd/npm-chainsaw`.
+
+**macOS Gatekeeper.** Binaries from the Releases page are unsigned. If macOS
+blocks one on first run, clear the quarantine flag or do the right-click
+dance:
+
+```sh
+xattr -d com.apple.quarantine npm-chainsaw
+```
 
 ## Usage
 
@@ -29,12 +41,9 @@ npm-chainsaw list.txt --json                      # JSON output
 npm-chainsaw list.txt --verbose                   # show all hit locations
 ```
 
-Exit codes:
-- `0` no hits
-- `1` hits found
-- `2` something went wrong
+Exit codes: `0` no hits, `1` hits found, `2` something went wrong.
 
-## List file format
+## Incident lists
 
 Plain text. `#` starts a comment, blank lines are ignored. Each
 non-comment line is `name@version`, with these options:
@@ -60,10 +69,12 @@ curl -O https://raw.githubusercontent.com/EliasPh/npm-chainsaw/main/incidents/<f
 ```
 
 See [`incidents/TEMPLATE.txt`](incidents/TEMPLATE.txt) for a copy-paste
-starting point. New incident files welcome via PR, see
-[`incidents/README.md`](incidents/README.md).
+starting point and [`incidents/README.md`](incidents/README.md) for how to
+contribute a new list via PR.
 
-## What gets scanned
+## How it works
+
+The scanner checks all of these:
 
 - `package.json` files anywhere under the scan root, including deeply
   nested `node_modules`.
@@ -74,14 +85,16 @@ starting point. New incident files welcome via PR, see
 - Common global install paths (Homebrew, nvm, fnm, Volta, system,
   Windows AppData).
 
-## Limitations
+**Limitations:**
 
 - Exact versions only, plus `@*`. No semver ranges.
 - Cache scanning is best-effort across many package manager versions;
   the `package.json` walk is the source of truth.
-- No git history, no advisory fetching, no remediation.
+- No git history, no fetching lists from the network, no remediation.
 
-### Why exact versions and not semver ranges?
+## FAQ
+
+**Why exact versions and not semver ranges?**
 
 Reports publish exact bad versions, not ranges. If `chalk@5.6.1` is
 compromised, then `5.6.2` is probably the fix release and is safe.
@@ -89,26 +102,16 @@ Flagging it would be a false positive that makes every other hit harder
 to trust.
 
 Note that `^5.6.1` in `package.json` is a range, but `npm install`
-resolves each range to a specific exact version, and that's what ends
-up on disk and in the lockfile. This scanner reads what's installed,
-not what was declared. So `chalk@5.6.1` in the list matches only
-installs that resolved to exactly `5.6.1`.
+resolves each range to a specific exact version, and that's what ends up
+on disk and in the lockfile. This scanner reads what's installed, not
+what was declared. So `chalk@5.6.1` in the list matches only installs
+that resolved to exactly `5.6.1`. For the "no version of the package is
+safe" case, use the `@*` wildcard.
 
-For the "no version of the package is safe" case, use the `@*` wildcard.
-
-## Why a binary instead of `npm audit`?
+**Why a binary instead of `npm audit`?**
 
 `npm audit` runs per-project. This runs once across the whole machine
 and checks caches too.
-
-## macOS Gatekeeper
-
-Binaries from the Releases page are unsigned. If macOS blocks one on first
-run, clear the quarantine flag or do the right-click dance:
-
-```sh
-xattr -d com.apple.quarantine npm-chainsaw
-```
 
 ## License
 
