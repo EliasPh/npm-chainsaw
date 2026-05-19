@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -39,22 +40,31 @@ func TestGroupHits_SortsAndDedupes(t *testing.T) {
 
 func TestPrintHuman_Empty(t *testing.T) {
 	targets := Targets{"chalk": {"5.6.1": true}, "lodash": {"*": true}}
+	counts := Counts{PackageJSON: 1234, Lockfile: 56}
 	var buf bytes.Buffer
-	printHuman(&buf, nil, targets, 1234, 250*time.Millisecond, false, false)
+	printHuman(&buf, nil, targets, counts, 250*time.Millisecond, false, false)
 	out := buf.String()
-	if !strings.Contains(out, "Scanned 1,234 files in 250ms.") {
-		t.Errorf("missing footer: %q", out)
+	if !strings.Contains(out, "Scanned in 250ms:") {
+		t.Errorf("missing footer header: %q", out)
 	}
-	if !strings.Contains(out, "No matches across 2 packages.") {
-		t.Errorf("missing No matches line: %q", out)
+	// The footer table is whitespace-aligned; match loosely so column-width
+	// tweaks don't break the test.
+	if !regexp.MustCompile(`package\.json\s+1,234\s+files`).MatchString(out) {
+		t.Errorf("missing package.json count row: %q", out)
 	}
-	// Both targets should appear as "ok" in the Targets block.
-	if !strings.Contains(out, "ok   chalk@5.6.1") || !strings.Contains(out, "ok   lodash@*") {
-		t.Errorf("Targets block missing ok entries:\n%s", out)
+	if !regexp.MustCompile(`lockfiles\s+56\s+files`).MatchString(out) {
+		t.Errorf("missing lockfiles count row: %q", out)
+	}
+	if !strings.Contains(out, "0 of 2 packages HIT") || !strings.Contains(out, "2 OK") {
+		t.Errorf("missing summary line: %q", out)
+	}
+	// Default mode should NOT include the per-target Targets block.
+	if strings.Contains(out, "ok   chalk@5.6.1") {
+		t.Errorf("default mode should not show per-target block:\n%s", out)
 	}
 }
 
-func TestPrintHuman_TargetsBlockMixed(t *testing.T) {
+func TestPrintHuman_DefaultIsTerseHits(t *testing.T) {
 	targets := Targets{
 		"chalk":  {"5.6.1": true},
 		"lodash": {"4.0.0": true},
@@ -63,16 +73,39 @@ func TestPrintHuman_TargetsBlockMixed(t *testing.T) {
 		{Name: "chalk", Version: "5.6.1", Path: "/x", Kind: "package.json"},
 	}
 	var buf bytes.Buffer
-	printHuman(&buf, hits, targets, 100, time.Second, false, false)
+	printHuman(&buf, hits, targets, Counts{PackageJSON: 100}, time.Second, false, false)
 	out := buf.String()
+	if !strings.Contains(out, "HIT  chalk@5.6.1") {
+		t.Errorf("expected HIT block for chalk:\n%s", out)
+	}
+	// Default mode: no per-target Targets block.
+	if strings.Contains(out, "Targets:") || strings.Contains(out, "ok   lodash") {
+		t.Errorf("default mode should not show Targets block:\n%s", out)
+	}
+	if !strings.Contains(out, "1 of 2 packages HIT") || !strings.Contains(out, "1 OK") {
+		t.Errorf("wrong summary line:\n%s", out)
+	}
+}
+
+func TestPrintHuman_VerboseAddsTargetsBlock(t *testing.T) {
+	targets := Targets{
+		"chalk":  {"5.6.1": true},
+		"lodash": {"4.0.0": true},
+	}
+	hits := []Hit{
+		{Name: "chalk", Version: "5.6.1", Path: "/x", Kind: "package.json"},
+	}
+	var buf bytes.Buffer
+	printHuman(&buf, hits, targets, Counts{PackageJSON: 100}, time.Second, true, false)
+	out := buf.String()
+	if !strings.Contains(out, "Targets:") {
+		t.Errorf("verbose mode missing Targets block:\n%s", out)
+	}
 	if !strings.Contains(out, "HIT  chalk@5.6.1  (1 location)") {
-		t.Errorf("expected HIT row for chalk:\n%s", out)
+		t.Errorf("verbose missing per-target HIT row:\n%s", out)
 	}
 	if !strings.Contains(out, "ok   lodash@4.0.0") {
-		t.Errorf("expected ok row for lodash:\n%s", out)
-	}
-	if !strings.Contains(out, "Matched 1 of 2 packages across 1 location.") {
-		t.Errorf("wrong footer:\n%s", out)
+		t.Errorf("verbose missing per-target ok row:\n%s", out)
 	}
 }
 
@@ -100,13 +133,13 @@ func TestPrintHuman_CapWithVerbose(t *testing.T) {
 	targets := Targets{"chalk": {"5.6.1": true}}
 
 	var compact bytes.Buffer
-	printHuman(&compact, hits, targets, 100, time.Second, false, false)
+	printHuman(&compact, hits, targets, Counts{PackageJSON: 100}, time.Second, false, false)
 	if !strings.Contains(compact.String(), "and 5 more") {
 		t.Errorf("expected cap message in non-verbose output, got:\n%s", compact.String())
 	}
 
 	var verbose bytes.Buffer
-	printHuman(&verbose, hits, targets, 100, time.Second, true, false)
+	printHuman(&verbose, hits, targets, Counts{PackageJSON: 100}, time.Second, true, false)
 	if strings.Contains(verbose.String(), "and 5 more") {
 		t.Errorf("verbose should show all, but got cap message:\n%s", verbose.String())
 	}
@@ -128,14 +161,20 @@ func TestPrintJSON_Shape(t *testing.T) {
 		"chalk":  {"5.6.1": true},
 		"lodash": {"4.0.0": true},
 	}
+	counts := Counts{PackageJSON: 40, Lockfile: 2}
 	var buf bytes.Buffer
-	if err := printJSON(&buf, hits, targets, 42, 100*time.Millisecond); err != nil {
+	if err := printJSON(&buf, hits, targets, counts, 100*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
-		ScannedFiles int   `json:"scanned_files"`
-		DurationMs   int64 `json:"duration_ms"`
-		Hits         []struct {
+		ScannedFiles int `json:"scanned_files"`
+		ScanCounts   struct {
+			PackageJSON int `json:"package_json"`
+			Lockfile    int `json:"lockfile"`
+			NpmCache    int `json:"npm_cache"`
+		} `json:"scan_counts"`
+		DurationMs int64 `json:"duration_ms"`
+		Hits       []struct {
 			Package, Version string
 			Locations        []struct{ Path, Kind string }
 		} `json:"hits"`
@@ -147,6 +186,9 @@ func TestPrintJSON_Shape(t *testing.T) {
 	if got.ScannedFiles != 42 || got.DurationMs != 100 {
 		t.Errorf("wrong header fields: %+v", got)
 	}
+	if got.ScanCounts.PackageJSON != 40 || got.ScanCounts.Lockfile != 2 {
+		t.Errorf("scan_counts wrong: %+v", got.ScanCounts)
+	}
 	if len(got.Hits) != 1 || got.Hits[0].Package != "chalk" || len(got.Hits[0].Locations) != 2 {
 		t.Errorf("wrong hit grouping: %+v", got.Hits)
 	}
@@ -157,7 +199,7 @@ func TestPrintJSON_Shape(t *testing.T) {
 
 func TestPrintJSON_EmptyArraysNotNull(t *testing.T) {
 	var buf bytes.Buffer
-	if err := printJSON(&buf, nil, Targets{}, 0, 0); err != nil {
+	if err := printJSON(&buf, nil, Targets{}, Counts{}, 0); err != nil {
 		t.Fatal(err)
 	}
 	s := buf.String()

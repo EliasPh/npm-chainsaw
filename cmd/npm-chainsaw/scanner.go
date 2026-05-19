@@ -19,6 +19,33 @@ type Hit struct {
 	Kind    string // "package.json", "lockfile", "npm-cache", "yarn-cache", "pnpm-store"
 }
 
+// Counts tracks how many files / entries each source inspected. The walk
+// fills PackageJSON and Lockfile; scanCaches fills the rest. cli.go merges
+// the two via Add so the report has one consolidated breakdown.
+type Counts struct {
+	PackageJSON int // package.json files read during the main walk
+	Lockfile    int // lockfile files read during the main walk
+	NpmCache    int // npm cache index ledger entries inspected
+	PnpmStore   int // package.json files in the pnpm store
+	YarnCache   int // yarn berry zip filenames + v1 cache package.json
+	Global      int // package.json files in global install locations
+}
+
+// Add accumulates b into a. Used to merge per-pass counts in the CLI.
+func (a *Counts) Add(b Counts) {
+	a.PackageJSON += b.PackageJSON
+	a.Lockfile += b.Lockfile
+	a.NpmCache += b.NpmCache
+	a.PnpmStore += b.PnpmStore
+	a.YarnCache += b.YarnCache
+	a.Global += b.Global
+}
+
+// Total returns the sum across every source.
+func (c Counts) Total() int {
+	return c.PackageJSON + c.Lockfile + c.NpmCache + c.PnpmStore + c.YarnCache + c.Global
+}
+
 // scan walks root and returns hits against targets, plus the number of
 // files actually inspected (used for the run-summary footer).
 //
@@ -43,14 +70,14 @@ type Hit struct {
 //
 // progress is an optional shared counter the caller can read concurrently
 // (e.g. from a progress-display goroutine). Pass nil if not needed.
-func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, int, error) {
+func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, Counts, error) {
 	counter := progress
 	if counter == nil {
 		counter = new(atomic.Int64)
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil, 0, err
+		return nil, Counts{}, err
 	}
 
 	// Buffered so the walker can stay ahead of the workers without blocking
@@ -76,6 +103,9 @@ func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, int, err
 		}()
 	}
 
+	// counts only the walker (single goroutine) updates, so plain ints
+	// are race-free without coordination.
+	var counts Counts
 	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
@@ -89,7 +119,13 @@ func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, int, err
 			}
 			return nil
 		}
-		if isInterestingFile(d.Name()) {
+		switch d.Name() {
+		case "package.json":
+			counts.PackageJSON++
+			counter.Add(1)
+			jobs <- path
+		case "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml":
+			counts.Lockfile++
 			counter.Add(1)
 			jobs <- path
 		}
@@ -97,18 +133,7 @@ func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, int, err
 	})
 	close(jobs)
 	wg.Wait()
-	return hits, int(counter.Load()), walkErr
-}
-
-// isInterestingFile reports whether a filename is one we want to read.
-func isInterestingFile(name string) bool {
-	switch name {
-	case "package.json",
-		"package-lock.json", "npm-shrinkwrap.json",
-		"yarn.lock", "pnpm-lock.yaml":
-		return true
-	}
-	return false
+	return hits, counts, walkErr
 }
 
 // processFile reads one file and returns any matching hits. Pure with
