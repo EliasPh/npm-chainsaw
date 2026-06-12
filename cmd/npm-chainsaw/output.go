@@ -164,9 +164,9 @@ func printHuman(w io.Writer, hits []Hit, targets Targets, counts Counts, gaps []
 }
 
 // printCompleteness writes the one-line verdict (and, under --verbose, the full
-// gap list). The verdict is deliberately scoped to what the scan actually read —
+// gap list). The verdict is deliberately scoped to what the scan actually read -
 // "under <root>", plus a note when --no-cache means the package caches were not
-// consulted — so a green "complete" can't be misread as a machine-wide guarantee.
+// consulted - so a green "complete" can't be misread as a machine-wide guarantee.
 // Hard gaps could hide an affected package, so any hard gap makes the scan
 // "incomplete"; soft gaps are unreachable corners that can't (OS dirs, links
 // outside the root) and leave the scan complete.
@@ -187,10 +187,10 @@ func printCompleteness(w io.Writer, gaps []Gap, scannedRoot, home string, noCach
 			fmt.Fprintf(w, "%s   run --verbose to list them%s\n", a.dim, a.reset)
 		}
 	case soft > 0:
-		fmt.Fprintf(w, "%scomplete%s — read every package.json under %s %s(%d non-package %s unreadable, e.g. OS-protected)%s\n",
+		fmt.Fprintf(w, "%scomplete%s - read every package.json under %s %s(%d non-package %s unreadable, e.g. OS-protected)%s\n",
 			a.green, a.reset, root, a.dim, soft, plural(soft, "location", "locations"), a.reset)
 	default:
-		fmt.Fprintf(w, "%scomplete%s — read every package.json under %s\n",
+		fmt.Fprintf(w, "%scomplete%s - read every package.json under %s\n",
 			a.green, a.reset, root)
 	}
 

@@ -9,7 +9,7 @@ issue. Open a private advisory through GitHub:
 
 (<https://github.com/EliasPh/npm-chainsaw/security/advisories/new>)
 
-You'll get an acknowledgement, and a fix or response on a best-effort basis —
+You'll get an acknowledgement, and a fix or response on a best-effort basis -
 this is a small, single-maintainer project, so please be patient.
 
 ## Scope and design guarantees
@@ -22,7 +22,7 @@ just intended:
   build time by [`readonly_test.go`](cmd/npm-chainsaw/readonly_test.go), which
   parses the scanner source and fails CI if a filesystem-mutating call or a
   process-spawning import (`os/exec`, `syscall`, …) appears. It is a denylist,
-  not a sandbox — see that file's notes on what it does and doesn't catch.
+  not a sandbox - see that file's notes on what it does and doesn't catch.
 - **No network.** The tool makes no network calls. It reads incident lists and
   installed packages from the local disk only; it never fetches lists or
   reports anything back.

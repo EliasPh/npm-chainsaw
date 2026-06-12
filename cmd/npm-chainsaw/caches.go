@@ -18,7 +18,7 @@ import (
 //
 // scanRoot is what the main walk already covered: any package.json-based
 // source under it is skipped here to avoid double-counting. The npm index and
-// Yarn Berry cache are exempt — they hold no package.json, so the walk never
+// Yarn Berry cache are exempt - they hold no package.json, so the walk never
 // touches them.
 func scanCaches(homeDir, scanRoot string, targets Targets) ([]Hit, Counts, []Gap) {
 	var (
@@ -150,7 +150,7 @@ func scanNpmCacheIndex(root string, targets Targets) ([]Hit, int, []Gap) {
 			}
 		}
 		// A scanner error (e.g. a ledger line over the 1MB buffer) leaves the
-		// rest of this file unread. Record it rather than silently truncating —
+		// rest of this file unread. Record it rather than silently truncating -
 		// the unread tail could hold an affected version.
 		if err := scanner.Err(); err != nil {
 			gaps = append(gaps, Gap{Path: path, Cause: causeCacheUnreadable, Severity: sevHard})

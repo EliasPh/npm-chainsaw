@@ -34,14 +34,14 @@ func gapsByCause(gaps []Gap) map[string][]Gap {
 // TestScan_DifferentialOracle is the "almost proof" of no false negatives: the
 // scanner's found set must EXACTLY equal an independent enumeration of every
 // package.json under the root, minus the two documented skips (.git and the
-// npm content-v2 blob store). Any package.json the scanner misses — or invents
-// — fails this test. Every fixture is a hit (target pkg@*), so "found" and
+// npm content-v2 blob store). Any package.json the scanner misses - or invents
+// - fails this test. Every fixture is a hit (target pkg@*), so "found" and
 // "every package.json" are directly comparable.
 func TestScan_DifferentialOracle(t *testing.T) {
 	root := t.TempDir()
 
 	// Found: package.json scattered across the awkward shapes a real machine
-	// has — top-level, nested, hidden-at-root, hidden-deep, deep transitive.
+	// has - top-level, nested, hidden-at-root, hidden-deep, deep transitive.
 	found := []string{
 		"package.json",
 		"a/package.json",
