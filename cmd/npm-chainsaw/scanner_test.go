@@ -20,43 +20,42 @@ func writePackageJSON(t *testing.T, path, name, version string) {
 	}
 }
 
-func TestScan_FindsHitsAndAppliesSkipRules(t *testing.T) {
+// TestScan_Completeness is the no-false-negatives guarantee: every installed
+// package.json under root must be found, wherever it hides; only .git and the
+// npm blob store are skipped. Add a skip rule and a planted hit here fails.
+func TestScan_Completeness(t *testing.T) {
 	root := t.TempDir()
 
-	// Should be found: top-level project.
-	writePackageJSON(t, filepath.Join(root, "proj/package.json"), "chalk", "5.6.1")
+	// (relative path, name, version, shouldBeFound). The found cases cover the
+	// awkward spots — nested deps and hidden root dirs (~/.vscode, ~/.config)
+	// the scanner used to miss.
+	type plant struct {
+		rel, name, version string
+		found              bool
+	}
+	plants := []plant{
+		{"proj/package.json", "chalk", "5.6.1", true},
+		{"proj/node_modules/foo/node_modules/chalk/package.json", "chalk", "5.6.1", true},
+		{"proj/node_modules/suspicious-pkg/package.json", "suspicious-pkg", "9.9.9", true}, // wildcard
+		{".hidden/package.json", "chalk", "5.6.1", true},
+		{".config/some-tool/node_modules/chalk/package.json", "chalk", "5.6.1", true},
+		{".vscode/extensions/ext/node_modules/chalk/package.json", "chalk", "5.6.1", true},
+		{"proj/node_modules/dep/node_modules/.cache/x/package.json", "chalk", "5.6.1", true}, // hidden, deep
 
-	// Should be found: deeply nested transitive in node_modules.
-	writePackageJSON(t,
-		filepath.Join(root, "proj/node_modules/foo/node_modules/chalk/package.json"),
-		"chalk", "5.6.1")
-
-	// Should NOT be found: version doesn't match.
-	writePackageJSON(t, filepath.Join(root, "proj/node_modules/safe/package.json"),
-		"chalk", "4.0.0")
-
-	// Should NOT be found: inside .git/.
-	writePackageJSON(t, filepath.Join(root, "proj/.git/hooks/package.json"),
-		"chalk", "5.6.1")
-
-	// Should NOT be found: inside a hidden dir at the scan root.
-	writePackageJSON(t, filepath.Join(root, ".hidden/package.json"),
-		"chalk", "5.6.1")
-
-	// Should NOT be found: inside a simulated npm content store.
-	writePackageJSON(t, filepath.Join(root, "fake-npm/_cacache/content-v2/p/package.json"),
-		"chalk", "5.6.1")
-
-	// Wildcard match: any version of suspicious-pkg counts.
-	writePackageJSON(t, filepath.Join(root, "proj/node_modules/suspicious-pkg/package.json"),
-		"suspicious-pkg", "9.9.9")
+		{"proj/node_modules/safe/package.json", "chalk", "4.0.0", false},         // wrong version
+		{"proj/.git/hooks/package.json", "chalk", "5.6.1", false},                // .git internals
+		{"fake-npm/_cacache/content-v2/p/package.json", "chalk", "5.6.1", false}, // npm blob store
+	}
+	for _, p := range plants {
+		writePackageJSON(t, filepath.Join(root, p.rel), p.name, p.version)
+	}
 
 	targets := Targets{
 		"chalk":          {"5.6.1": true},
 		"suspicious-pkg": {"*": true},
 	}
 
-	hits, counts, err := scan(root, targets, nil)
+	hits, counts, _, err := scan(root, targets, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,13 +71,16 @@ func TestScan_FindsHitsAndAppliesSkipRules(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := []string{
-		"chalk@5.6.1|proj/node_modules/foo/node_modules/chalk/package.json",
-		"chalk@5.6.1|proj/package.json",
-		"suspicious-pkg@9.9.9|proj/node_modules/suspicious-pkg/package.json",
+	var want []string
+	for _, p := range plants {
+		if p.found {
+			want = append(want, p.name+"@"+p.version+"|"+filepath.FromSlash(p.rel))
+		}
 	}
+	sort.Strings(want)
+
 	if len(got) != len(want) {
-		t.Fatalf("hits = %v, want %v", got, want)
+		t.Fatalf("hits = %v\nwant %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -103,7 +105,7 @@ func TestScan_FindsLockfileHits(t *testing.T) {
 	if err := os.WriteFile(lock, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hits, _, err := scan(root, Targets{"chalk": {"5.6.1": true}}, nil)
+	hits, _, _, err := scan(root, Targets{"chalk": {"5.6.1": true}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +124,7 @@ func TestScan_IgnoresMalformedJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hits, _, err := scan(root, Targets{"chalk": {"5.6.1": true}}, nil)
+	hits, _, _, err := scan(root, Targets{"chalk": {"5.6.1": true}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

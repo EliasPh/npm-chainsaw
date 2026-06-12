@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -47,7 +48,7 @@ func TestScanNpmCacheIndex(t *testing.T) {
 		"@ctrl/tinycolor": {"*": true},
 		// lodash deliberately not listed
 	}
-	hits, entries := scanNpmCacheIndex(root, targets)
+	hits, entries, _ := scanNpmCacheIndex(root, targets)
 	if len(hits) != 2 {
 		t.Fatalf("got %d hits, want 2: %v", len(hits), hits)
 	}
@@ -63,6 +64,39 @@ func TestScanNpmCacheIndex(t *testing.T) {
 	}
 	if !found["chalk@5.6.1"] || !found["@ctrl/tinycolor@4.1.2"] {
 		t.Errorf("missing expected hits: %v", found)
+	}
+}
+
+// TestScanNpmCacheIndex_OverlongLineIsGap guards the completeness contract for
+// the cache index: a ledger line longer than the scanner's buffer leaves the
+// rest of the file unread, which must surface as a hard cache-unreadable gap
+// rather than being silently truncated to "clean".
+func TestScanNpmCacheIndex_OverlongLineIsGap(t *testing.T) {
+	root := t.TempDir()
+	leaf := filepath.Join(root, "ab")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A valid entry, then a line well over the 1MB buffer ceiling (no newline
+	// fits within the buffer, so bufio.Scanner stops with ErrTooLong).
+	body := "x\t{\"key\":\"https://reg/chalk/-/chalk-5.6.1.tgz\"}\n" +
+		strings.Repeat("a", 2<<20) + "\n"
+	if err := os.WriteFile(filepath.Join(leaf, "ledger"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, _, gaps := scanNpmCacheIndex(root, Targets{"chalk": {"5.6.1": true}})
+	if len(hits) != 1 {
+		t.Errorf("want the pre-truncation hit preserved, got %d hits: %v", len(hits), hits)
+	}
+	var hard int
+	for _, g := range gaps {
+		if g.Cause == causeCacheUnreadable && g.Severity == sevHard {
+			hard++
+		}
+	}
+	if hard != 1 {
+		t.Errorf("want 1 hard cache-unreadable gap from the truncated ledger, got %d (%v)", hard, gaps)
 	}
 }
 
@@ -97,7 +131,10 @@ func TestScanCaches_AcrossSources(t *testing.T) {
 	zipPath := filepath.Join(berry, "chalk-npm-5.6.1-deadbeef10-cf4c61a9bd.zip")
 	os.WriteFile(zipPath, nil, 0o644)
 
-	hits, counts := scanCaches(home, Targets{"chalk": {"5.6.1": true}})
+	// scanRoot is unrelated to home, so nothing is treated as already-walked
+	// and every source reports. (The skip path is covered by the test below.)
+	scanRoot := t.TempDir()
+	hits, counts, _ := scanCaches(home, scanRoot, Targets{"chalk": {"5.6.1": true}})
 	if counts.Total() == 0 {
 		t.Errorf("counts total should be > 0, got %+v", counts)
 	}
@@ -110,5 +147,41 @@ func TestScanCaches_AcrossSources(t *testing.T) {
 		if kinds[want] == 0 {
 			t.Errorf("expected at least one hit of kind %q, got %v", want, kinds)
 		}
+	}
+}
+
+// TestScanCaches_SkipsPathsUnderScanRoot is the double-count guard: a cache
+// under the already-walked scanRoot must be skipped, but the npm index (a
+// ledger, not package.json) is exempt and must still report.
+func TestScanCaches_SkipsPathsUnderScanRoot(t *testing.T) {
+	home := t.TempDir()
+
+	// pnpm store under home; scanning with scanRoot == home, so the walk owns it.
+	pnpmPkg := filepath.Join(home, "Library", "pnpm", "store", "v3", "files", "chalk", "package.json")
+	if err := os.MkdirAll(filepath.Dir(pnpmPkg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(pnpmPkg, []byte(`{"name":"chalk","version":"5.6.1"}`), 0o644)
+
+	// npm index under home too, but it's not package.json, so it's exempt.
+	npmIdx := filepath.Join(home, ".npm", "_cacache", "index-v5", "ab")
+	if err := os.MkdirAll(npmIdx, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(npmIdx, "ledger"),
+		[]byte("x\t{\"key\":\"https://reg/chalk/-/chalk-5.6.1.tgz\"}\n"), 0o644)
+
+	hits, counts, _ := scanCaches(home, home, Targets{"chalk": {"5.6.1": true}})
+
+	if counts.PnpmStore != 0 {
+		t.Errorf("pnpm store under scan root should be skipped, got count %d", counts.PnpmStore)
+	}
+	for _, h := range hits {
+		if h.Kind == "pnpm-store" {
+			t.Errorf("pnpm-store hit should have been skipped (under scan root): %+v", h)
+		}
+	}
+	if counts.NpmCache == 0 {
+		t.Errorf("npm cache index is not package.json and must still be scanned, got %+v", counts)
 	}
 }

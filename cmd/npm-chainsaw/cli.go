@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -40,11 +41,13 @@ type cliOpts struct {
 
 // runCLI parses args, dispatches the run, and returns the process exit code.
 //
-// Exit codes (per SPEC.md):
+// Exit codes:
 //
-//	0  clean, no hits (also: --version, --help)
+//	0  clean & complete: no hits, no hard gaps (also: --version, --help)
 //	1  hits found
 //	2  error (bad flags, missing/unreadable input, parse error)
+//	3  no hits, but incomplete: at least one hard gap (a location that could
+//	   hide an affected package couldn't be read). See gaps.go.
 func runCLI(args []string) int {
 	fs := flag.NewFlagSet("npm-chainsaw", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -93,6 +96,13 @@ func runCLI(args []string) int {
 		return 2
 	}
 
+	// Absolute scan root, so cache scanning can skip what the walk covered.
+	absScanRoot, err := filepath.Abs(opts.scanRoot)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+
 	// Load the incident list. Errors here are fatal (exit 2).
 	f, err := os.Open(opts.listPath)
 	if err != nil {
@@ -124,39 +134,51 @@ func runCLI(args []string) int {
 		go progressLoop(&counter, progressDone)
 	}
 
-	hits, counts, err := scan(opts.scanRoot, targets, &counter)
+	hits, counts, gaps, err := scan(opts.scanRoot, targets, &counter)
 	if err != nil {
 		close(progressDone)
 		fmt.Fprintln(os.Stderr, "error during scan:", err)
 		return 2
 	}
 	if !opts.noCache && home != "" {
-		cacheHits, cacheCounts := scanCaches(home, targets)
+		cacheHits, cacheCounts, cacheGaps := scanCaches(home, absScanRoot, targets)
 		hits = append(hits, cacheHits...)
 		counts.Add(cacheCounts)
+		gaps = append(gaps, cacheGaps...)
 	}
 	close(progressDone)
 	dur := time.Since(start)
+	gaps = sortGaps(gaps)
 
 	if opts.jsonOut {
-		if err := printJSON(os.Stdout, hits, targets, counts, dur); err != nil {
+		if err := printJSON(os.Stdout, hits, targets, counts, gaps, dur, absScanRoot); err != nil {
 			fmt.Fprintln(os.Stderr, "error encoding json:", err)
 			return 2
 		}
 	} else {
-		printHuman(os.Stdout, hits, targets, counts, dur, opts.verbose, colorEnabled(os.Stdout))
+		printHuman(os.Stdout, hits, targets, counts, gaps, dur, absScanRoot, opts.verbose, colorEnabled(os.Stdout), opts.noCache)
 	}
 
-	if len(hits) > 0 {
+	// Exit-code precedence: error (2, handled above) > hits (1) > incomplete
+	// (3: no hits but at least one hard gap) > clean & complete (0). CI gates
+	// "provably clean" on exit 0.
+	switch {
+	case len(hits) > 0:
 		return 1
+	case countHard(gaps) > 0:
+		return 3
+	default:
+		return 0
 	}
-	return 0
 }
 
 // printUsage writes the help text. Kept terse on purpose; full docs live in
 // README.md.
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `npm-chainsaw: scan for compromised npm packages.
+
+Read-only: opens files for reading only, never writes, deletes, or executes
+anything (enforced by readonly_test.go).
 
 Usage:
   npm-chainsaw <list.txt> [path] [flags]
@@ -173,8 +195,10 @@ Flags:
   --help        Show this message
 
 Exit codes:
-  0  no hits
+  0  no hits, scan complete
   1  hits found
   2  error
+  3  no hits, but scan incomplete (a location that could hide a package
+     couldn't be read; run --verbose to see which)
 `)
 }

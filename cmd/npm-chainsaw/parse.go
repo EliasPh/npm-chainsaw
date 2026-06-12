@@ -91,22 +91,33 @@ type nameVersionPair struct {
 }
 
 // parseLockfile reads the file at path, dispatches to the right parser by
-// filename, and dedupes pairs within a single lockfile.
-func parseLockfile(path string) []nameVersionPair {
+// filename, dedupes pairs, and returns a hard gap when the file can't be read
+// or its format isn't understood. Lockfiles are part of the completeness
+// contract, so "I found a lockfile but couldn't parse it" is surfaced, not
+// swallowed. Each parser reports an "understood" bool; see their docs for how
+// format drift is detected conservatively (positive evidence of package
+// entries we failed to extract), so a legitimately empty lockfile is fine.
+func parseLockfile(path string) ([]nameVersionPair, *Gap) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, &Gap{Path: path, Cause: causeUnreadableFile, Severity: sevHard}
 	}
-	var pairs []nameVersionPair
+	var (
+		pairs      []nameVersionPair
+		understood = true
+	)
 	switch filepath.Base(path) {
 	case "package-lock.json", "npm-shrinkwrap.json":
-		pairs = parseNpmLock(data)
+		pairs, understood = parseNpmLock(data)
 	case "yarn.lock":
-		pairs = parseYarnLock(data)
+		pairs, understood = parseYarnLock(data)
 	case "pnpm-lock.yaml":
-		pairs = parsePnpmLock(data)
+		pairs, understood = parsePnpmLock(data)
 	}
-	return dedupePairs(pairs)
+	if !understood {
+		return dedupePairs(pairs), &Gap{Path: path, Cause: causeLockfileParse, Severity: sevHard}
+	}
+	return dedupePairs(pairs), nil
 }
 
 func dedupePairs(in []nameVersionPair) []nameVersionPair {
@@ -134,7 +145,11 @@ func dedupePairs(in []nameVersionPair) []nameVersionPair {
 //
 // v1 uses a nested "dependencies" tree keyed by the package name directly.
 // Both forms can coexist; we collect from both.
-func parseNpmLock(data []byte) []nameVersionPair {
+//
+// The second return is false only when the JSON won't unmarshal — a clean,
+// unambiguous "not understood" signal. A lockfile that parses but lists no
+// packages (e.g. a dependency-free project) is understood, just empty.
+func parseNpmLock(data []byte) ([]nameVersionPair, bool) {
 	var raw struct {
 		Packages map[string]struct {
 			Name    string `json:"name,omitempty"`
@@ -143,7 +158,7 @@ func parseNpmLock(data []byte) []nameVersionPair {
 		Dependencies map[string]*npmLockV1Dep `json:"dependencies"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil
+		return nil, false
 	}
 	var out []nameVersionPair
 	for key, entry := range raw.Packages {
@@ -159,7 +174,7 @@ func parseNpmLock(data []byte) []nameVersionPair {
 		}
 	}
 	walkV1Deps(raw.Dependencies, &out)
-	return out
+	return out, true
 }
 
 // npmLockV1Dep is the recursive shape used by lockfileVersion 1.
@@ -202,9 +217,14 @@ func nameFromLockKey(key string) string {
 // Known limitations:
 //   - aliased packages like "foo@npm:bar@^1.0.0" extract "foo@npm:bar" as
 //     the name; rare in practice and not worth a fuller parser
-func parseYarnLock(data []byte) []nameVersionPair {
+//
+// The second return is false only on positive evidence of format drift: we saw
+// at least one package header but extracted zero versions. A lockfile with no
+// package stanzas (header-less, just metadata/comments) is understood as empty.
+func parseYarnLock(data []byte) ([]nameVersionPair, bool) {
 	var out []nameVersionPair
 	var currentNames []string
+	sawHeader := false
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		raw := scanner.Text()
@@ -231,6 +251,9 @@ func parseYarnLock(data []byte) []nameVersionPair {
 					currentNames = append(currentNames, name)
 				}
 			}
+			if len(currentNames) > 0 {
+				sawHeader = true
+			}
 			continue
 		}
 		// Indented line under a header: look for a version field.
@@ -244,7 +267,7 @@ func parseYarnLock(data []byte) []nameVersionPair {
 			currentNames = currentNames[:0]
 		}
 	}
-	return out
+	return out, !(sawHeader && len(out) == 0)
 }
 
 // nameFromYarnSpec returns the package name from a yarn spec like
@@ -279,10 +302,10 @@ func extractYarnVersion(line string) string {
 
 // pnpmPkgRE matches the package-key lines in a pnpm lockfile, e.g.
 //
-//	  /chalk@5.6.1:
-//	  /@ctrl/tinycolor@4.1.2:
-//	  /react-dom@18.0.0(react@18.0.0):
-//	  chalk@5.6.1:                       (v9 dropped the leading slash)
+//	/chalk@5.6.1:
+//	/@ctrl/tinycolor@4.1.2:
+//	/react-dom@18.0.0(react@18.0.0):
+//	chalk@5.6.1:                       (v9 dropped the leading slash)
 //
 // The optional "(peer@ver)" suffix is consumed but discarded.
 //
@@ -292,15 +315,27 @@ func extractYarnVersion(line string) string {
 var pnpmPkgRE = regexp.MustCompile(
 	`^\s+'?/?((?:@[^@/\s'"()]+/)?[^@/\s'"()]+)@([^@\s'"():]+)(?:\([^)]*\))*'?:`)
 
-func parsePnpmLock(data []byte) []nameVersionPair {
+// pnpmCandidateRE loosely matches an indented versioned package key (name@N…,
+// version starting with a digit). It's the "there are package entries here"
+// signal: if candidates exist but the strict pnpmPkgRE extracted none, our
+// parser drifted from the format and we report the lockfile as not understood.
+var pnpmCandidateRE = regexp.MustCompile(
+	`^\s+'?/?(?:@[^@/\s]+/)?[^@/\s]+@\d`)
+
+func parsePnpmLock(data []byte) ([]nameVersionPair, bool) {
 	var out []nameVersionPair
+	candidates := 0
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		m := pnpmPkgRE.FindStringSubmatch(scanner.Text())
+		line := scanner.Text()
+		if pnpmCandidateRE.MatchString(line) {
+			candidates++
+		}
+		m := pnpmPkgRE.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
 		out = append(out, nameVersionPair{m[1], m[2]})
 	}
-	return out
+	return out, !(candidates > 0 && len(out) == 0)
 }

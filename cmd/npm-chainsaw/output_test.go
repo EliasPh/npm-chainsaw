@@ -42,9 +42,9 @@ func TestPrintHuman_Empty(t *testing.T) {
 	targets := Targets{"chalk": {"5.6.1": true}, "lodash": {"*": true}}
 	counts := Counts{PackageJSON: 1234, Lockfile: 56}
 	var buf bytes.Buffer
-	printHuman(&buf, nil, targets, counts, 250*time.Millisecond, false, false)
+	printHuman(&buf, nil, targets, counts, nil, 250*time.Millisecond, "/scan", false, false, false)
 	out := buf.String()
-	if !strings.Contains(out, "Scanned in 250ms:") {
+	if !strings.Contains(out, "Scanned /scan in 250ms:") {
 		t.Errorf("missing footer header: %q", out)
 	}
 	// The footer table is whitespace-aligned; match loosely so column-width
@@ -62,6 +62,32 @@ func TestPrintHuman_Empty(t *testing.T) {
 	if strings.Contains(out, "ok   chalk@5.6.1") {
 		t.Errorf("default mode should not show per-target block:\n%s", out)
 	}
+	// No gaps -> complete.
+	if !strings.Contains(out, "complete") {
+		t.Errorf("expected completeness verdict:\n%s", out)
+	}
+}
+
+func TestPrintHuman_VerdictIsScoped(t *testing.T) {
+	targets := Targets{"chalk": {"5.6.1": true}}
+
+	// Gapless scan: the verdict names the root it actually covered, so a green
+	// "complete" can't be read as a machine-wide guarantee.
+	var buf bytes.Buffer
+	printHuman(&buf, nil, targets, Counts{PackageJSON: 1}, nil, time.Second, "/scan", false, false, false)
+	if !strings.Contains(buf.String(), "read every package.json under /scan") {
+		t.Errorf("verdict should be scoped to the root:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "caches not checked") {
+		t.Errorf("without --no-cache there should be no caches note:\n%s", buf.String())
+	}
+
+	// --no-cache adds the scope reminder that caches were not consulted.
+	var nc bytes.Buffer
+	printHuman(&nc, nil, targets, Counts{PackageJSON: 1}, nil, time.Second, "/scan", false, false, true)
+	if !strings.Contains(nc.String(), "caches not checked (--no-cache)") {
+		t.Errorf("--no-cache run should note caches were skipped:\n%s", nc.String())
+	}
 }
 
 func TestPrintHuman_DefaultIsTerseHits(t *testing.T) {
@@ -73,7 +99,7 @@ func TestPrintHuman_DefaultIsTerseHits(t *testing.T) {
 		{Name: "chalk", Version: "5.6.1", Path: "/x", Kind: "package.json"},
 	}
 	var buf bytes.Buffer
-	printHuman(&buf, hits, targets, Counts{PackageJSON: 100}, time.Second, false, false)
+	printHuman(&buf, hits, targets, Counts{PackageJSON: 100}, nil, time.Second, "/scan", false, false, false)
 	out := buf.String()
 	if !strings.Contains(out, "HIT  chalk@5.6.1") {
 		t.Errorf("expected HIT block for chalk:\n%s", out)
@@ -96,7 +122,7 @@ func TestPrintHuman_VerboseAddsTargetsBlock(t *testing.T) {
 		{Name: "chalk", Version: "5.6.1", Path: "/x", Kind: "package.json"},
 	}
 	var buf bytes.Buffer
-	printHuman(&buf, hits, targets, Counts{PackageJSON: 100}, time.Second, true, false)
+	printHuman(&buf, hits, targets, Counts{PackageJSON: 100}, nil, time.Second, "/scan", true, false, false)
 	out := buf.String()
 	if !strings.Contains(out, "Targets:") {
 		t.Errorf("verbose mode missing Targets block:\n%s", out)
@@ -133,13 +159,13 @@ func TestPrintHuman_CapWithVerbose(t *testing.T) {
 	targets := Targets{"chalk": {"5.6.1": true}}
 
 	var compact bytes.Buffer
-	printHuman(&compact, hits, targets, Counts{PackageJSON: 100}, time.Second, false, false)
+	printHuman(&compact, hits, targets, Counts{PackageJSON: 100}, nil, time.Second, "/scan", false, false, false)
 	if !strings.Contains(compact.String(), "and 5 more") {
 		t.Errorf("expected cap message in non-verbose output, got:\n%s", compact.String())
 	}
 
 	var verbose bytes.Buffer
-	printHuman(&verbose, hits, targets, Counts{PackageJSON: 100}, time.Second, true, false)
+	printHuman(&verbose, hits, targets, Counts{PackageJSON: 100}, nil, time.Second, "/scan", true, false, false)
 	if strings.Contains(verbose.String(), "and 5 more") {
 		t.Errorf("verbose should show all, but got cap message:\n%s", verbose.String())
 	}
@@ -162,26 +188,34 @@ func TestPrintJSON_Shape(t *testing.T) {
 		"lodash": {"4.0.0": true},
 	}
 	counts := Counts{PackageJSON: 40, Lockfile: 2}
+	gaps := []Gap{{Path: "/x/node_modules/bad/package.json", Cause: causeMalformedJSON, Severity: sevHard}}
 	var buf bytes.Buffer
-	if err := printJSON(&buf, hits, targets, counts, 100*time.Millisecond); err != nil {
+	if err := printJSON(&buf, hits, targets, counts, gaps, 100*time.Millisecond, "/scan"); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
-		ScannedFiles int `json:"scanned_files"`
+		ScannedRoot  string `json:"scanned_root"`
+		ScannedFiles int    `json:"scanned_files"`
 		ScanCounts   struct {
 			PackageJSON int `json:"package_json"`
 			Lockfile    int `json:"lockfile"`
 			NpmCache    int `json:"npm_cache"`
 		} `json:"scan_counts"`
 		DurationMs int64 `json:"duration_ms"`
+		Complete   bool  `json:"complete"`
+		HardGaps   int   `json:"hard_gaps"`
 		Hits       []struct {
 			Package, Version string
 			Locations        []struct{ Path, Kind string }
 		} `json:"hits"`
-		Unmatched []struct{ Package, Version string } `json:"unmatched"`
+		Unmatched []struct{ Package, Version string }      `json:"unmatched"`
+		Gaps      []struct{ Path, Cause, Severity string } `json:"gaps"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("output not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got.ScannedRoot != "/scan" {
+		t.Errorf("wrong scanned_root: %q", got.ScannedRoot)
 	}
 	if got.ScannedFiles != 42 || got.DurationMs != 100 {
 		t.Errorf("wrong header fields: %+v", got)
@@ -195,11 +229,17 @@ func TestPrintJSON_Shape(t *testing.T) {
 	if len(got.Unmatched) != 1 || got.Unmatched[0].Package != "lodash" {
 		t.Errorf("wrong unmatched list: %+v", got.Unmatched)
 	}
+	if got.Complete || got.HardGaps != 1 {
+		t.Errorf("expected complete=false, hard_gaps=1, got complete=%v hard_gaps=%d", got.Complete, got.HardGaps)
+	}
+	if len(got.Gaps) != 1 || got.Gaps[0].Severity != "hard" || got.Gaps[0].Cause != "malformed-json" {
+		t.Errorf("wrong gaps array: %+v", got.Gaps)
+	}
 }
 
 func TestPrintJSON_EmptyArraysNotNull(t *testing.T) {
 	var buf bytes.Buffer
-	if err := printJSON(&buf, nil, Targets{}, Counts{}, 0); err != nil {
+	if err := printJSON(&buf, nil, Targets{}, Counts{}, nil, 0, "/scan"); err != nil {
 		t.Fatal(err)
 	}
 	s := buf.String()
@@ -209,13 +249,19 @@ func TestPrintJSON_EmptyArraysNotNull(t *testing.T) {
 	if !strings.Contains(s, `"unmatched": []`) {
 		t.Errorf("expected unmatched as empty array, got:\n%s", s)
 	}
+	if !strings.Contains(s, `"gaps": []`) {
+		t.Errorf("expected gaps as empty array, got:\n%s", s)
+	}
+	if !strings.Contains(s, `"complete": true`) {
+		t.Errorf("expected complete=true for a gapless scan, got:\n%s", s)
+	}
 }
 
 func TestShortenPath(t *testing.T) {
 	cases := []struct{ in, home, want string }{
-		{"/Users/elias/foo", "/Users/elias", "~/foo"},
-		{"/Users/elias", "/Users/elias", "~"},
-		{"/usr/local/lib", "/Users/elias", "/usr/local/lib"},
+		{"/Users/me/foo", "/Users/me", "~/foo"},
+		{"/Users/me", "/Users/me", "~"},
+		{"/usr/local/lib", "/Users/me", "/usr/local/lib"},
 		{"/anything", "", "/anything"},
 	}
 	for _, c := range cases {

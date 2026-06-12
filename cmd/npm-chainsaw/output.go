@@ -93,9 +93,10 @@ func groupHits(hits []Hit) []hitGroup {
 // printHuman writes a grouped, human-friendly report.
 //
 // In default mode the output is intentionally terse: HIT blocks (capped at
-// 20 locations each) and a per-kind breakdown footer. --verbose adds the
-// full per-target HIT/ok block at the bottom and removes the location cap.
-func printHuman(w io.Writer, hits []Hit, targets Targets, counts Counts, dur time.Duration, verbose, color bool) {
+// 20 locations each), a per-kind breakdown footer, and a one-line completeness
+// verdict with gap counts. --verbose adds the full per-target HIT/ok block and
+// the full gap list, and removes the location cap.
+func printHuman(w io.Writer, hits []Hit, targets Targets, counts Counts, gaps []Gap, dur time.Duration, scannedRoot string, verbose, color, noCache bool) {
 	a := ansiCodes(color)
 	home, _ := os.UserHomeDir()
 	groups := groupHits(hits)
@@ -140,7 +141,7 @@ func printHuman(w io.Writer, hits []Hit, targets Targets, counts Counts, dur tim
 
 	// Per-kind breakdown. Reassuring confirmation that the scan did the
 	// work, even when there are zero hits.
-	fmt.Fprintf(w, "Scanned in %s:\n", durStr(dur))
+	fmt.Fprintf(w, "Scanned %s in %s:\n", shortenPath(scannedRoot, home), durStr(dur))
 	for _, row := range countRows(counts) {
 		fmt.Fprintf(w, "  %-12s %8s %s\n", row.label, commafy(row.n), row.unit)
 	}
@@ -157,6 +158,82 @@ func printHuman(w io.Writer, hits []Hit, targets Targets, counts Counts, dur tim
 		fmt.Fprintf(w, "%s%s%d of %d packages HIT%s, %s%d OK%s\n",
 			a.bold, a.red, hitN, total, a.reset,
 			a.green, total-hitN, a.reset)
+	}
+
+	printCompleteness(w, gaps, scannedRoot, home, noCache, verbose, a)
+}
+
+// printCompleteness writes the one-line verdict (and, under --verbose, the full
+// gap list). The verdict is deliberately scoped to what the scan actually read —
+// "under <root>", plus a note when --no-cache means the package caches were not
+// consulted — so a green "complete" can't be misread as a machine-wide guarantee.
+// Hard gaps could hide an affected package, so any hard gap makes the scan
+// "incomplete"; soft gaps are unreachable corners that can't (OS dirs, links
+// outside the root) and leave the scan complete.
+func printCompleteness(w io.Writer, gaps []Gap, scannedRoot, home string, noCache, verbose bool, a ansi) {
+	hard := countHard(gaps)
+	soft := len(gaps) - hard
+	root := shortenPath(scannedRoot, home)
+
+	switch {
+	case hard > 0:
+		fmt.Fprintf(w, "%s%sINCOMPLETE%s  %d %s under %s could hide a package and were unreadable",
+			a.bold, a.red, a.reset, hard, plural(hard, "location", "locations"), root)
+		if soft > 0 {
+			fmt.Fprintf(w, "%s (+%d other unreadable)%s", a.dim, soft, a.reset)
+		}
+		fmt.Fprintln(w)
+		if !verbose {
+			fmt.Fprintf(w, "%s   run --verbose to list them%s\n", a.dim, a.reset)
+		}
+	case soft > 0:
+		fmt.Fprintf(w, "%scomplete%s — read every package.json under %s %s(%d non-package %s unreadable, e.g. OS-protected)%s\n",
+			a.green, a.reset, root, a.dim, soft, plural(soft, "location", "locations"), a.reset)
+	default:
+		fmt.Fprintf(w, "%scomplete%s — read every package.json under %s\n",
+			a.green, a.reset, root)
+	}
+
+	// Scope reminder: with --no-cache the npm/pnpm/yarn caches were never read,
+	// so the verdict speaks only for installed packages under the root.
+	if noCache {
+		fmt.Fprintf(w, "%s   caches not checked (--no-cache): verdict covers installed packages only%s\n",
+			a.dim, a.reset)
+	}
+
+	if verbose && len(gaps) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Gaps:")
+		for _, g := range gaps {
+			tag := "soft"
+			color := a.dim
+			if g.Severity == sevHard {
+				tag, color = "hard", a.red
+			}
+			fmt.Fprintf(w, "  %s%-4s%s %s  %s(%s)%s\n",
+				color, tag, a.reset, shortenPath(g.Path, home),
+				a.dim, gapCauseLabel(g.Cause), a.reset)
+		}
+	}
+}
+
+// gapCauseLabel maps a Gap.Cause to a short human label.
+func gapCauseLabel(cause string) string {
+	switch cause {
+	case causeUnreadableDir:
+		return "unreadable dir"
+	case causeUnreadableFile:
+		return "unreadable file"
+	case causeMalformedJSON:
+		return "malformed json"
+	case causeLockfileParse:
+		return "lockfile not understood"
+	case causeSymlinkSkipped:
+		return "symlink outside scan root"
+	case causeCacheUnreadable:
+		return "cache unreadable"
+	default:
+		return cause
 	}
 }
 
@@ -180,8 +257,10 @@ func countRows(c Counts) []countRow {
 }
 
 // printJSON writes the machine-readable form. Paths are absolute (no ~
-// substitution; that's only for human display).
-func printJSON(w io.Writer, hits []Hit, targets Targets, counts Counts, dur time.Duration) error {
+// substitution; that's only for human display). It always carries the full
+// structured gap list plus "complete" (false iff there's a hard gap), so a
+// consumer can verify completeness without re-deriving it from exit codes.
+func printJSON(w io.Writer, hits []Hit, targets Targets, counts Counts, gaps []Gap, dur time.Duration, scannedRoot string) error {
 	type jsonLoc struct {
 		Path string `json:"path"`
 		Kind string `json:"kind"`
@@ -203,13 +282,23 @@ func printJSON(w io.Writer, hits []Hit, targets Targets, counts Counts, dur time
 		YarnCache   int `json:"yarn_cache"`
 		Global      int `json:"global"`
 	}
+	type jsonGap struct {
+		Path     string `json:"path"`
+		Cause    string `json:"cause"`
+		Severity string `json:"severity"`
+	}
 	out := struct {
+		ScannedRoot  string          `json:"scanned_root"`
 		ScannedFiles int             `json:"scanned_files"`
 		ScanCounts   jsonCounts      `json:"scan_counts"`
 		DurationMs   int64           `json:"duration_ms"`
+		Complete     bool            `json:"complete"`
+		HardGaps     int             `json:"hard_gaps"`
 		Hits         []jsonGroup     `json:"hits"`
 		Unmatched    []jsonUnmatched `json:"unmatched"`
+		Gaps         []jsonGap       `json:"gaps"`
 	}{
+		ScannedRoot:  scannedRoot,
 		ScannedFiles: counts.Total(),
 		ScanCounts: jsonCounts{
 			PackageJSON: counts.PackageJSON,
@@ -220,8 +309,11 @@ func printJSON(w io.Writer, hits []Hit, targets Targets, counts Counts, dur time
 			Global:      counts.Global,
 		},
 		DurationMs: dur.Milliseconds(),
+		Complete:   countHard(gaps) == 0,
+		HardGaps:   countHard(gaps),
 		Hits:       []jsonGroup{},     // emit "[]" not "null" when empty
 		Unmatched:  []jsonUnmatched{}, // ditto
+		Gaps:       []jsonGap{},       // ditto
 	}
 	groups := groupHits(hits)
 	for _, g := range groups {
@@ -235,6 +327,9 @@ func printJSON(w io.Writer, hits []Hit, targets Targets, counts Counts, dur time
 		if s.locations == 0 {
 			out.Unmatched = append(out.Unmatched, jsonUnmatched{Package: s.name, Version: s.version})
 		}
+	}
+	for _, g := range gaps {
+		out.Gaps = append(out.Gaps, jsonGap{Path: g.Path, Cause: g.Cause, Severity: g.Severity})
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

@@ -1,5 +1,5 @@
 // Command npm-chainsaw scans a machine for npm packages with known-bad
-// versions. See README.md for usage and SPEC.md for the original design.
+// versions. See README.md for usage.
 package main
 
 import "os"

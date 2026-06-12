@@ -127,7 +127,11 @@ func TestParseNpmLock_V3(t *testing.T) {
 		{"chalk", "4.0.0"}:           true,
 		{"@ctrl/tinycolor", "4.1.2"}: true,
 	}
-	got := pairSet(parseNpmLock(data))
+	pairs, ok := parseNpmLock(data)
+	if !ok {
+		t.Fatal("valid npm lock should be understood")
+	}
+	got := pairSet(pairs)
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -149,7 +153,11 @@ func TestParseNpmLock_V1(t *testing.T) {
         }
       }
     }`)
-	got := pairSet(parseNpmLock(data))
+	pairs, ok := parseNpmLock(data)
+	if !ok {
+		t.Fatal("valid npm lock should be understood")
+	}
+	got := pairSet(pairs)
 	want := []nameVersionPair{{"chalk", "5.6.1"}, {"foo", "1.0.0"}, {"chalk", "4.0.0"}}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -158,6 +166,13 @@ func TestParseNpmLock_V1(t *testing.T) {
 		if !got[p] {
 			t.Errorf("missing pair %v", p)
 		}
+	}
+}
+
+func TestParseNpmLock_Malformed(t *testing.T) {
+	// Broken JSON is an unambiguous "not understood" signal.
+	if _, ok := parseNpmLock([]byte("{ not json")); ok {
+		t.Errorf("malformed npm lock should not be understood")
 	}
 }
 
@@ -174,7 +189,11 @@ chalk@^5.6.0, chalk@^5.6.1:
   version "4.1.2"
   resolved "https://registry.example/tinycolor-4.1.2.tgz"
 `)
-	got := pairSet(parseYarnLock(data))
+	pairs, ok := parseYarnLock(data)
+	if !ok {
+		t.Fatal("valid yarn.lock should be understood")
+	}
+	got := pairSet(pairs)
 	want := []nameVersionPair{{"chalk", "5.6.1"}, {"@ctrl/tinycolor", "4.1.2"}}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -197,9 +216,25 @@ func TestParseYarnLock_Berry(t *testing.T) {
   languageName: node
   linkType: hard
 `)
-	got := parseYarnLock(data)
+	got, ok := parseYarnLock(data)
+	if !ok {
+		t.Fatal("valid berry yarn.lock should be understood")
+	}
 	if len(got) != 1 || got[0] != (nameVersionPair{"chalk", "5.6.1"}) {
 		t.Errorf("got %v, want [{chalk 5.6.1}]", got)
+	}
+}
+
+func TestParseYarnLock_NotUnderstood(t *testing.T) {
+	// A package header with no version line below it is positive evidence the
+	// parser didn't understand the format: not understood.
+	data := []byte("chalk@^5.0.0:\n  resolution: \"x\"\n")
+	if _, ok := parseYarnLock(data); ok {
+		t.Errorf("yarn header with no version should be flagged not-understood")
+	}
+	// An empty / metadata-only lockfile is understood (just no packages).
+	if _, ok := parseYarnLock([]byte("# yarn lockfile v1\n")); !ok {
+		t.Errorf("empty yarn.lock should be understood")
 	}
 }
 
@@ -221,7 +256,11 @@ packages:
   chalk@5.7.0:
     resolution: {integrity: sha512-DDD==}
 `)
-	got := pairSet(parsePnpmLock(data))
+	pairs, ok := parsePnpmLock(data)
+	if !ok {
+		t.Fatal("valid pnpm lock should be understood")
+	}
+	got := pairSet(pairs)
 	want := []nameVersionPair{
 		{"chalk", "5.6.1"},
 		{"@ctrl/tinycolor", "4.1.2"},
@@ -238,6 +277,19 @@ packages:
 	}
 }
 
+func TestParsePnpmLock_NotUnderstood(t *testing.T) {
+	// Versioned package keys present but not in the strict form we extract
+	// (no trailing colon): positive evidence of format drift.
+	data := []byte("packages:\n  chalk@5.6.1 not-a-key\n  @scope/x@1.0.0 nope\n")
+	if _, ok := parsePnpmLock(data); ok {
+		t.Errorf("pnpm with package-looking lines but zero matches should be not-understood")
+	}
+	// A lockfile with no package entries at all is understood (empty).
+	if _, ok := parsePnpmLock([]byte("lockfileVersion: '6.0'\n")); !ok {
+		t.Errorf("empty pnpm lock should be understood")
+	}
+}
+
 func TestParseLockfile_DedupesAndDispatches(t *testing.T) {
 	dir := t.TempDir()
 	pl := dir + "/package-lock.json"
@@ -251,7 +303,10 @@ func TestParseLockfile_DedupesAndDispatches(t *testing.T) {
 	if err := writeFile(pl, body); err != nil {
 		t.Fatal(err)
 	}
-	got := parseLockfile(pl)
+	got, gap := parseLockfile(pl)
+	if gap != nil {
+		t.Errorf("valid lockfile should produce no gap, got %+v", gap)
+	}
 	if len(got) != 1 || got[0] != (nameVersionPair{"chalk", "5.6.1"}) {
 		t.Errorf("got %v, want one chalk@5.6.1", got)
 	}
