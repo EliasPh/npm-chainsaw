@@ -31,8 +31,9 @@ text file.
    go run ./cmd/npm-chainsaw incidents/YYYY-MM-your-slug.txt /tmp
    ```
 
-   You'll see a "Searching for N packages..." header listing every
-   entry. Bad lines produce a parse error and exit code 2.
+   You'll see a "Checking N packages (M specifiers)" header; add
+   `--verbose` to list every entry it parsed. Bad lines produce a parse
+   error and exit code 2.
 5. Open a PR with the new file. Suggested title:
    `incident: YYYY-MM <short name>`. Link to the source in the
    PR description.

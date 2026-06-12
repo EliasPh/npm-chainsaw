@@ -7,8 +7,8 @@ import (
 
 func TestSplitFlagsAndPositionals(t *testing.T) {
 	cases := []struct {
-		name              string
-		in                []string
+		name               string
+		in                 []string
 		wantFlags, wantPos []string
 	}{
 		{

@@ -14,3 +14,4 @@ coverage.txt
 
 # Claude Code settings (personal tooling, not part of the project)
 .claude/
+CLAUDE.md

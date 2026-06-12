@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -46,38 +45,36 @@ func (c Counts) Total() int {
 	return c.PackageJSON + c.Lockfile + c.NpmCache + c.PnpmStore + c.YarnCache + c.Global
 }
 
-// scan walks root and returns hits against targets, plus the number of
-// files actually inspected (used for the run-summary footer).
+// scan walks root and returns hits against targets, a count of files
+// inspected (for the footer), and any gaps — locations it could not fully
+// cover (see gaps.go). A run is only "provably clean" with zero hits AND zero
+// hard gaps.
 //
-// The walk runs on the calling goroutine and only does skip-rule checks and
-// filename matching. Interesting paths go to a pool of runtime.NumCPU()
-// workers that do the ReadFile + parse + match. Hits are appended under a
-// mutex. The set of hits is the same as a single-threaded walk, just in
-// non-deterministic order; output.go sorts before display.
+// The walker goroutine does skip checks, gap recording, and filename matching;
+// matching paths go to a pool of runtime.NumCPU() workers that read, parse, and
+// match. Hits and worker gaps are collected under mutexes, so order is
+// non-deterministic; output.go sorts.
 //
-// Skip rules during the walk:
-//   - .git directories anywhere
-//   - any _cacache/content-v2 directory (the npm tarball store, gigabytes
-//     of compressed packages; the index is enough to answer "ever fetched")
-//   - hidden dirs (".something") at the scan root only. This keeps a
-//     default "scan $HOME" from descending into ~/.Trash, ~/.cache, etc.
-//     Hidden dirs deeper down (e.g. node_modules/.bin) are walked normally.
-//   - symbolic links: filepath.WalkDir doesn't follow them by default,
-//     which is what we want.
-//
-// Individual path errors (permission denied, etc.) are dropped to keep the
-// walk going. A future --verbose mode will surface them.
-//
-// progress is an optional shared counter the caller can read concurrently
-// (e.g. from a progress-display goroutine). Pass nil if not needed.
-func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, Counts, error) {
+// The walk is intentionally exhaustive — hidden dirs included, so a scan can't
+// miss an install (see shouldSkipDir for the only two exceptions). Symlinks
+// aren't followed (filepath.WalkDir's default); a directory symlink whose
+// target escapes the scan root is recorded as a gap rather than silently
+// dropped (symlinkGap).
+func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, Counts, []Gap, error) {
 	counter := progress
 	if counter == nil {
 		counter = new(atomic.Int64)
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil, Counts{}, err
+		return nil, Counts{}, nil, err
+	}
+	// Resolved form of the root, so symlink targets (which EvalSymlinks
+	// returns resolved, e.g. /private/var on macOS) can be compared against it
+	// without falsely flagging in-root links as escaping.
+	realRoot, evErr := filepath.EvalSymlinks(absRoot)
+	if evErr != nil {
+		realRoot = absRoot
 	}
 
 	// Buffered so the walker can stay ahead of the workers without blocking
@@ -85,37 +82,57 @@ func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, Counts, 
 	jobs := make(chan string, 256)
 
 	var (
-		wg     sync.WaitGroup
-		hitsMu sync.Mutex
-		hits   []Hit
+		wg         sync.WaitGroup
+		resultsMu  sync.Mutex
+		hits       []Hit
+		workerGaps []Gap
 	)
 	for i := 0; i < runtime.NumCPU(); i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for path := range jobs {
-				if found := processFile(path, targets); len(found) > 0 {
-					hitsMu.Lock()
-					hits = append(hits, found...)
-					hitsMu.Unlock()
+				foundHits, foundGaps := processFile(path, targets)
+				if len(foundHits) > 0 || len(foundGaps) > 0 {
+					resultsMu.Lock()
+					hits = append(hits, foundHits...)
+					workerGaps = append(workerGaps, foundGaps...)
+					resultsMu.Unlock()
 				}
 			}
 		}()
 	}
 
-	// counts only the walker (single goroutine) updates, so plain ints
-	// are race-free without coordination.
+	// counts and walkGaps are touched only by the walker (single goroutine),
+	// so plain values are race-free without coordination.
 	var counts Counts
+	var walkGaps []Gap
 	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if d != nil && d.IsDir() {
+			// A directory (or the root) we couldn't read is a gap, not a
+			// silent skip — it may have held an install we never saw.
+			g := Gap{Path: path, Cause: causeUnreadableDir, Severity: dirSeverity(path)}
+			if d != nil && !d.IsDir() {
+				g.Cause = causeUnreadableFile
+			}
+			walkGaps = append(walkGaps, g)
+			if d == nil || d.IsDir() {
 				return fs.SkipDir
 			}
 			return nil
 		}
 		if d.IsDir() {
-			if shouldSkipDir(path, d.Name(), absRoot) {
+			if shouldSkipDir(path, d.Name()) {
 				return fs.SkipDir
+			}
+			return nil
+		}
+		// A directory symlink that resolves outside the scan root is content
+		// the walk will never reach; record it. In-root targets (e.g. pnpm's
+		// top-level links into .pnpm) are already walked, so they're skipped.
+		if d.Type()&fs.ModeSymlink != 0 {
+			if g, ok := symlinkGap(path, absRoot, realRoot); ok {
+				walkGaps = append(walkGaps, g)
 			}
 			return nil
 		}
@@ -133,45 +150,60 @@ func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, Counts, 
 	})
 	close(jobs)
 	wg.Wait()
-	return hits, counts, walkErr
+	gaps := append(walkGaps, workerGaps...)
+	return hits, counts, gaps, walkErr
 }
 
-// processFile reads one file and returns any matching hits. Pure with
-// respect to shared state, so it's safe to call from many goroutines.
-func processFile(path string, targets Targets) []Hit {
+// processFile reads one file and returns matching hits plus any gaps (an
+// unreadable/corrupt package.json, or a lockfile whose format we couldn't
+// parse). Pure with respect to shared state, so it's safe from many goroutines.
+func processFile(path string, targets Targets) ([]Hit, []Gap) {
 	switch filepath.Base(path) {
 	case "package.json":
-		if h, ok := matchPackageJSON(path, targets, "package.json"); ok {
-			return []Hit{h}
+		h, ok, gap := matchPackageJSON(path, targets, "package.json")
+		var hits []Hit
+		var gaps []Gap
+		if ok {
+			hits = []Hit{h}
 		}
+		if gap != nil {
+			gaps = []Gap{*gap}
+		}
+		return hits, gaps
 	case "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml":
-		var found []Hit
-		for _, p := range parseLockfile(path) {
+		pairs, gap := parseLockfile(path)
+		var hits []Hit
+		for _, p := range pairs {
 			if h, ok := matchPair(p, path, targets); ok {
-				found = append(found, h)
+				hits = append(hits, h)
 			}
 		}
-		return found
+		var gaps []Gap
+		if gap != nil {
+			gaps = []Gap{*gap}
+		}
+		return hits, gaps
 	}
-	return nil
+	return nil, nil
 }
 
-// shouldSkipDir applies the walk skip rules. Kept as a small pure helper so
-// it's straightforward to unit-test.
-func shouldSkipDir(path, name, absRoot string) bool {
-	if name == ".git" {
-		return true
+// symlinkGap decides whether a directory symlink at path is a gap. It's a gap
+// only if it resolves to a directory outside the scan root: that target is
+// content the no-follow walk will never reach. Links resolving inside the root
+// are already covered, file/dangling links can't hide a package tree.
+func symlinkGap(path, absRoot, realRoot string) (Gap, bool) {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return Gap{}, false // dangling or unreadable link: don't spam
 	}
-	// "_cacache/content-v2" is the npm tarball store. Walking it once took
-	// 20+ minutes in an earlier bash attempt; never read this directory.
-	if name == "content-v2" && filepath.Base(filepath.Dir(path)) == "_cacache" {
-		return true
+	fi, err := os.Stat(real)
+	if err != nil || !fi.IsDir() {
+		return Gap{}, false // only directory symlinks can hide a package tree
 	}
-	// Hidden directories at the scan root only. Deeper hidden dirs are fine.
-	if strings.HasPrefix(name, ".") && filepath.Dir(path) == absRoot {
-		return true
+	if withinRoot(absRoot, real) || withinRoot(realRoot, real) {
+		return Gap{}, false // target is under the scan root: already walked
 	}
-	return false
+	return Gap{Path: path, Cause: causeSymlinkSkipped, Severity: dirSeverity(path)}, true
 }
 
 // matchPair turns a (name, version) pair from a lockfile into a Hit if it
@@ -188,15 +220,19 @@ func matchPair(p nameVersionPair, path string, targets Targets) (Hit, bool) {
 	return Hit{}, false
 }
 
-// matchPackageJSON reads name+version from a package.json and reports a hit
-// if the package is in targets. The kind argument labels the source (e.g.
-// "package.json", "pnpm-store", "global") for downstream display. Read
-// errors and malformed JSON are treated as "no match"; better to miss a
-// corrupt file than crash the scan.
-func matchPackageJSON(path string, targets Targets, kind string) (Hit, bool) {
+// matchPackageJSON reads name+version from a package.json and reports a hit if
+// the package is in targets. The kind argument labels the source (e.g.
+// "package.json", "pnpm-store", "global") for downstream display.
+//
+// The third return value is a hard gap when the file exists but we couldn't
+// turn it into an identity: an unreadable file or malformed JSON could be the
+// affected package, so we surface it rather than silently treating it as clean.
+// A valid package.json with no "name" is a project/workspace manifest, not an
+// install, so it's neither a hit nor a gap.
+func matchPackageJSON(path string, targets Targets, kind string) (Hit, bool, *Gap) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Hit{}, false
+		return Hit{}, false, &Gap{Path: path, Cause: causeUnreadableFile, Severity: sevHard}
 	}
 	// Only the two fields we need; json.Unmarshal silently ignores the rest.
 	var p struct {
@@ -204,17 +240,30 @@ func matchPackageJSON(path string, targets Targets, kind string) (Hit, bool) {
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
-		return Hit{}, false
+		return Hit{}, false, &Gap{Path: path, Cause: causeMalformedJSON, Severity: sevHard}
 	}
 	if p.Name == "" {
-		return Hit{}, false
+		return Hit{}, false, nil
 	}
 	versions, ok := targets[p.Name]
 	if !ok {
-		return Hit{}, false
+		return Hit{}, false, nil
 	}
 	if versions[p.Version] || versions["*"] {
-		return Hit{Name: p.Name, Version: p.Version, Path: path, Kind: kind}, true
+		return Hit{Name: p.Name, Version: p.Version, Path: path, Kind: kind}, true, nil
 	}
-	return Hit{}, false
+	return Hit{}, false, nil
+}
+
+// shouldSkipDir reports the only two directories the walk skips: .git (VCS
+// internals) and npm's _cacache/content-v2 tarball store (compressed blobs,
+// no readable package.json — "ever fetched" comes from the cache index).
+func shouldSkipDir(path, name string) bool {
+	if name == ".git" {
+		return true
+	}
+	if name == "content-v2" && filepath.Base(filepath.Dir(path)) == "_cacache" {
+		return true
+	}
+	return false
 }
