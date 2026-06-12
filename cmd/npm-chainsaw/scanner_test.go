@@ -27,7 +27,7 @@ func TestScan_Completeness(t *testing.T) {
 	root := t.TempDir()
 
 	// (relative path, name, version, shouldBeFound). The found cases cover the
-	// awkward spots — nested deps and hidden root dirs (~/.vscode, ~/.config)
+	// awkward spots - nested deps and hidden root dirs (~/.vscode, ~/.config)
 	// the scanner used to miss.
 	type plant struct {
 		rel, name, version string

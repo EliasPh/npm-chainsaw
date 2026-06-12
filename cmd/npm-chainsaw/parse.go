@@ -146,7 +146,7 @@ func dedupePairs(in []nameVersionPair) []nameVersionPair {
 // v1 uses a nested "dependencies" tree keyed by the package name directly.
 // Both forms can coexist; we collect from both.
 //
-// The second return is false only when the JSON won't unmarshal — a clean,
+// The second return is false only when the JSON won't unmarshal - a clean,
 // unambiguous "not understood" signal. A lockfile that parses but lists no
 // packages (e.g. a dependency-free project) is understood, just empty.
 func parseNpmLock(data []byte) ([]nameVersionPair, bool) {

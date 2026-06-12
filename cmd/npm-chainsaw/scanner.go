@@ -46,7 +46,7 @@ func (c Counts) Total() int {
 }
 
 // scan walks root and returns hits against targets, a count of files
-// inspected (for the footer), and any gaps — locations it could not fully
+// inspected (for the footer), and any gaps - locations it could not fully
 // cover (see gaps.go). A run is only "provably clean" with zero hits AND zero
 // hard gaps.
 //
@@ -55,7 +55,7 @@ func (c Counts) Total() int {
 // match. Hits and worker gaps are collected under mutexes, so order is
 // non-deterministic; output.go sorts.
 //
-// The walk is intentionally exhaustive — hidden dirs included, so a scan can't
+// The walk is intentionally exhaustive - hidden dirs included, so a scan can't
 // miss an install (see shouldSkipDir for the only two exceptions). Symlinks
 // aren't followed (filepath.WalkDir's default); a directory symlink whose
 // target escapes the scan root is recorded as a gap rather than silently
@@ -110,7 +110,7 @@ func scan(root string, targets Targets, progress *atomic.Int64) ([]Hit, Counts, 
 	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// A directory (or the root) we couldn't read is a gap, not a
-			// silent skip — it may have held an install we never saw.
+			// silent skip - it may have held an install we never saw.
 			g := Gap{Path: path, Cause: causeUnreadableDir, Severity: dirSeverity(path)}
 			if d != nil && !d.IsDir() {
 				g.Cause = causeUnreadableFile
@@ -257,7 +257,7 @@ func matchPackageJSON(path string, targets Targets, kind string) (Hit, bool, *Ga
 
 // shouldSkipDir reports the only two directories the walk skips: .git (VCS
 // internals) and npm's _cacache/content-v2 tarball store (compressed blobs,
-// no readable package.json — "ever fetched" comes from the cache index).
+// no readable package.json - "ever fetched" comes from the cache index).
 func shouldSkipDir(path, name string) bool {
 	if name == ".git" {
 		return true
